@@ -22,49 +22,12 @@ from sklearn import datasets
 from sklearn.datasets import make_blobs
 from sklearn.metrics.pairwise import rbf_kernel
 from sklearn.model_selection import train_test_split
-from sklearn.utils.estimator_checks import check_estimator
 
 from onedal.svm import SVC
 from onedal.tests.utils._device_selection import (
     get_queues,
     pass_if_not_implemented_for_gpu,
 )
-
-
-def _replace_and_save(md, fns, replacing_fn):
-    saved = dict()
-    for check_f in fns:
-        try:
-            fn = getattr(md, check_f)
-            setattr(md, check_f, replacing_fn)
-            saved[check_f] = fn
-        except RuntimeError:
-            pass
-    return saved
-
-
-def _restore_from_saved(md, saved_dict):
-    for check_f in saved_dict:
-        setattr(md, check_f, saved_dict[check_f])
-
-
-def test_estimator():
-    def dummy(*args, **kwargs):
-        pass
-
-    md = sklearn.utils.estimator_checks
-    saved = _replace_and_save(
-        md,
-        [
-            "check_sample_weights_invariance",  # Max absolute difference: 0.0008
-            "check_estimators_fit_returns_self",  # ValueError: empty metadata
-            "check_classifiers_train",  # assert y_pred.shape == (n_samples,)
-            "check_estimators_unfitted",  # Call 'fit' with appropriate arguments
-        ],
-        dummy,
-    )
-    check_estimator(SVC())
-    _restore_from_saved(md, saved)
 
 
 def _test_libsvm_parameters(queue, array_constr, dtype):
@@ -79,11 +42,12 @@ def _test_libsvm_parameters(queue, array_constr, dtype):
     assert_array_equal(clf.predict(X), y)
 
 
-# TODO: investigate sporadic failures on GPU
-@pytest.mark.parametrize("queue", get_queues("cpu"))
+@pytest.mark.parametrize("queue", get_queues())
 @pytest.mark.parametrize("array_constr", [np.array])
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 def test_libsvm_parameters(queue, array_constr, dtype):
+    if queue and queue.sycl_device.is_gpu:
+        pytest.skip("Sporadic failures on GPU sycl_queue.")
     _test_libsvm_parameters(queue, array_constr, dtype)
 
 
@@ -109,9 +73,10 @@ def test_class_weight(queue):
     assert_array_almost_equal(clf.predict(X, queue=queue), [2] * 6)
 
 
-# TODO: investigate sporadic failures on GPU
-@pytest.mark.parametrize("queue", get_queues("cpu"))
+@pytest.mark.parametrize("queue", get_queues())
 def test_sample_weight(queue):
+    if queue and queue.sycl_device.is_gpu:
+        pytest.skip("Sporadic failures on GPU sycl_queue.")
     X = np.array([[-2, 0], [-1, -1], [0, -2], [0, 2], [1, 1], [2, 2]])
     y = np.array([1, 1, 1, 2, 2, 2])
 

@@ -83,6 +83,17 @@ class NuSVC(sklearn_NuSVC, BaseSVC):
     def fit(self, X, y, sample_weight=None):
         if sklearn_check_version("1.2"):
             self._validate_params()
+        elif self.nu <= 0 or self.nu > 1:
+            # else if added to correct issues with
+            # sklearn tests:
+            # svm/tests/test_sparse.py::test_error
+            # svm/tests/test_svm.py::test_bad_input
+            # for sklearn versions < 1.2 (i.e. without
+            # validate_params parameter checking)
+            # Without this, a segmentation fault with
+            # Windows fatal exception: access violation
+            # occurs
+            raise ValueError("nu <= 0 or nu > 1")
         if sklearn_check_version("1.0"):
             self._check_feature_names(X, reset=True)
         dispatch(
@@ -94,7 +105,7 @@ class NuSVC(sklearn_NuSVC, BaseSVC):
             },
             X,
             y,
-            sample_weight,
+            sample_weight=sample_weight,
         )
 
         return self
@@ -242,12 +253,31 @@ class NuSVC(sklearn_NuSVC, BaseSVC):
 
     decision_function.__doc__ = sklearn_NuSVC.decision_function.__doc__
 
+    def _get_sample_weight(self, X, y, sample_weight=None):
+        sample_weight = super()._get_sample_weight(X, y, sample_weight)
+        if sample_weight is None:
+            return sample_weight
+
+        weight_per_class = [
+            np.sum(sample_weight[y == class_label]) for class_label in np.unique(y)
+        ]
+
+        for i in range(len(weight_per_class)):
+            for j in range(i + 1, len(weight_per_class)):
+                if self.nu * (weight_per_class[i] + weight_per_class[j]) / 2 > min(
+                    weight_per_class[i], weight_per_class[j]
+                ):
+                    raise ValueError("specified nu is infeasible")
+
+        return sample_weight
+
     def _onedal_fit(self, X, y, sample_weight=None, queue=None):
+        X, _, weights = self._onedal_fit_checks(X, y, sample_weight)
         onedal_params = {
             "nu": self.nu,
             "kernel": self.kernel,
             "degree": self.degree,
-            "gamma": self.gamma,
+            "gamma": self._compute_gamma_sigma(X),
             "coef0": self.coef0,
             "tol": self.tol,
             "shrinking": self.shrinking,
@@ -259,10 +289,16 @@ class NuSVC(sklearn_NuSVC, BaseSVC):
         }
 
         self._onedal_estimator = onedal_NuSVC(**onedal_params)
-        self._onedal_estimator.fit(X, y, sample_weight, queue=queue)
+        self._onedal_estimator.fit(X, y, weights, queue=queue)
 
         if self.probability:
-            self._fit_proba(X, y, sample_weight, queue=queue)
+            self._fit_proba(
+                X,
+                y,
+                sample_weight=sample_weight,
+                queue=queue,
+            )
+
         self._save_attributes()
 
     def _onedal_predict(self, X, queue=None):

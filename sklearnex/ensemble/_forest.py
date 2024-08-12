@@ -29,7 +29,7 @@ from sklearn.ensemble._forest import ForestClassifier as sklearn_ForestClassifie
 from sklearn.ensemble._forest import ForestRegressor as sklearn_ForestRegressor
 from sklearn.ensemble._forest import _get_n_samples_bootstrap
 from sklearn.exceptions import DataConversionWarning
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, r2_score
 from sklearn.tree import (
     DecisionTreeClassifier,
     DecisionTreeRegressor,
@@ -38,7 +38,12 @@ from sklearn.tree import (
 )
 from sklearn.tree._tree import Tree
 from sklearn.utils import check_random_state, deprecated
-from sklearn.utils.validation import check_array, check_is_fitted
+from sklearn.utils.validation import (
+    _check_sample_weight,
+    check_array,
+    check_is_fitted,
+    check_X_y,
+)
 
 from daal4py.sklearn._n_jobs_support import control_n_jobs
 from daal4py.sklearn._utils import (
@@ -70,14 +75,15 @@ class BaseForest(ABC):
         X, y = self._validate_data(
             X,
             y,
-            multi_output=False,
+            multi_output=True,
             accept_sparse=False,
             dtype=[np.float64, np.float32],
             force_all_finite=False,
+            ensure_2d=True,
         )
 
         if sample_weight is not None:
-            sample_weight = self.check_sample_weight(sample_weight, X)
+            sample_weight = _check_sample_weight(sample_weight, X)
 
         if y.ndim == 2 and y.shape[1] == 1:
             warnings.warn(
@@ -97,8 +103,6 @@ class BaseForest(ABC):
 
         y, expanded_class_weight = self._validate_y_class_weight(y)
 
-        self.n_features_in_ = X.shape[1]
-
         if expanded_class_weight is not None:
             if sample_weight is not None:
                 sample_weight = sample_weight * expanded_class_weight
@@ -114,7 +118,9 @@ class BaseForest(ABC):
             "min_samples_split": self.min_samples_split,
             "min_samples_leaf": self.min_samples_leaf,
             "min_weight_fraction_leaf": self.min_weight_fraction_leaf,
-            "max_features": self.max_features,
+            "max_features": self._to_absolute_max_features(
+                self.max_features, self.n_features_in_
+            ),
             "max_leaf_nodes": self.max_leaf_nodes,
             "min_impurity_decrease": self.min_impurity_decrease,
             "bootstrap": self.bootstrap,
@@ -173,6 +179,45 @@ class BaseForest(ABC):
             self._n_samples_bootstrap = None
         self._validate_estimator()
         return self
+
+    def _to_absolute_max_features(self, max_features, n_features):
+        if max_features is None:
+            return n_features
+        if isinstance(max_features, str):
+            if max_features == "auto":
+                if not sklearn_check_version("1.3"):
+                    if sklearn_check_version("1.1"):
+                        warnings.warn(
+                            "`max_features='auto'` has been deprecated in 1.1 "
+                            "and will be removed in 1.3. To keep the past behaviour, "
+                            "explicitly set `max_features=1.0` or remove this "
+                            "parameter as it is also the default value for "
+                            "RandomForestRegressors and ExtraTreesRegressors.",
+                            FutureWarning,
+                        )
+                    return (
+                        max(1, int(np.sqrt(n_features)))
+                        if isinstance(self, ForestClassifier)
+                        else n_features
+                    )
+            if max_features == "sqrt":
+                return max(1, int(np.sqrt(n_features)))
+            if max_features == "log2":
+                return max(1, int(np.log2(n_features)))
+            allowed_string_values = (
+                '"sqrt" or "log2"'
+                if sklearn_check_version("1.3")
+                else '"auto", "sqrt" or "log2"'
+            )
+            raise ValueError(
+                "Invalid value for max_features. Allowed string "
+                f"values are {allowed_string_values}."
+            )
+        if isinstance(max_features, (numbers.Integral, np.integer)):
+            return max_features
+        if max_features > 0.0:
+            return max(1, int(max_features * n_features))
+        return 0
 
     def _check_parameters(self):
         if isinstance(self.min_samples_leaf, numbers.Integral):
@@ -248,38 +293,6 @@ class BaseForest(ABC):
             raise ValueError(
                 "min_bin_size must be integral number but was " "%r" % self.min_bin_size
             )
-
-    def check_sample_weight(self, sample_weight, X, dtype=None):
-        n_samples = _num_samples(X)
-
-        if dtype is not None and dtype not in [np.float32, np.float64]:
-            dtype = np.float64
-
-        if sample_weight is None:
-            sample_weight = np.ones(n_samples, dtype=dtype)
-        elif isinstance(sample_weight, numbers.Number):
-            sample_weight = np.full(n_samples, sample_weight, dtype=dtype)
-        else:
-            if dtype is None:
-                dtype = [np.float64, np.float32]
-            sample_weight = check_array(
-                sample_weight,
-                accept_sparse=False,
-                ensure_2d=False,
-                dtype=dtype,
-                order="C",
-                force_all_finite=False,
-            )
-            if sample_weight.ndim != 1:
-                raise ValueError("Sample weights must be 1D array or scalar")
-
-            if sample_weight.shape != (n_samples,):
-                raise ValueError(
-                    "sample_weight.shape == {}, expected {}!".format(
-                        sample_weight.shape, (n_samples,)
-                    )
-                )
-        return sample_weight
 
     @property
     def estimators_(self):
@@ -518,7 +531,7 @@ class ForestClassifier(sklearn_ForestClassifier, BaseForest):
             )
 
         if patching_status.get_status():
-            X, y = self._validate_data(
+            X, y = check_X_y(
                 X,
                 y,
                 multi_output=True,
@@ -738,6 +751,10 @@ class ForestClassifier(sklearn_ForestClassifier, BaseForest):
                         or self.estimator.__class__ == DecisionTreeClassifier,
                         "ExtraTrees only supported starting from oneDAL version 2023.1",
                     ),
+                    (
+                        not self.oob_score,
+                        "oob_scores using r2 or accuracy not implemented.",
+                    ),
                     (sample_weight is None, "sample_weight is not supported."),
                 ]
             )
@@ -780,24 +797,43 @@ class ForestClassifier(sklearn_ForestClassifier, BaseForest):
         check_is_fitted(self, "_onedal_estimator")
 
         if sklearn_check_version("1.0"):
-            self._check_feature_names(X, reset=False)
-
-        X = check_array(
-            X,
-            dtype=[np.float64, np.float32],
-            force_all_finite=False,
-        )  # Warning, order of dtype matters
+            X = self._validate_data(
+                X,
+                dtype=[np.float64, np.float32],
+                force_all_finite=False,
+                reset=False,
+                ensure_2d=True,
+            )
+        else:
+            X = check_array(
+                X,
+                dtype=[np.float64, np.float32],
+                force_all_finite=False,
+            )  # Warning, order of dtype matters
+            self._check_n_features(X, reset=False)
 
         res = self._onedal_estimator.predict(X, queue=queue)
         return np.take(self.classes_, res.ravel().astype(np.int64, casting="unsafe"))
 
     def _onedal_predict_proba(self, X, queue=None):
-        X = check_array(X, dtype=[np.float64, np.float32], force_all_finite=False)
         check_is_fitted(self, "_onedal_estimator")
 
-        self._check_n_features(X, reset=False)
         if sklearn_check_version("1.0"):
-            self._check_feature_names(X, reset=False)
+            X = self._validate_data(
+                X,
+                dtype=[np.float64, np.float32],
+                force_all_finite=False,
+                reset=False,
+                ensure_2d=True,
+            )
+        else:
+            X = check_array(
+                X,
+                dtype=[np.float64, np.float32],
+                force_all_finite=False,
+            )  # Warning, order of dtype matters
+            self._check_n_features(X, reset=False)
+
         return self._onedal_estimator.predict_proba(X, queue=queue)
 
     def _onedal_score(self, X, y, sample_weight=None, queue=None):
@@ -914,7 +950,7 @@ class ForestRegressor(sklearn_ForestRegressor, BaseForest):
             )
 
         if patching_status.get_status():
-            X, y = self._validate_data(
+            X, y = check_X_y(
                 X,
                 y,
                 multi_output=True,
@@ -996,7 +1032,7 @@ class ForestRegressor(sklearn_ForestRegressor, BaseForest):
                 ]
             )
 
-        elif method_name == "predict":
+        elif method_name in ["predict", "score"]:
             X = data[0]
 
             patching_status.and_conditions(
@@ -1046,11 +1082,12 @@ class ForestRegressor(sklearn_ForestRegressor, BaseForest):
                         or self.estimator.__class__ == DecisionTreeClassifier,
                         "ExtraTrees only supported starting from oneDAL version 2023.1",
                     ),
+                    (not self.oob_score, "oob_score value is not sklearn conformant."),
                     (sample_weight is None, "sample_weight is not supported."),
                 ]
             )
 
-        elif method_name == "predict":
+        elif method_name in ["predict", "score"]:
             X = data[0]
 
             patching_status.and_conditions(
@@ -1083,15 +1120,27 @@ class ForestRegressor(sklearn_ForestRegressor, BaseForest):
         return patching_status
 
     def _onedal_predict(self, X, queue=None):
-        X = check_array(
-            X, dtype=[np.float64, np.float32], force_all_finite=False
-        )  # Warning, order of dtype matters
         check_is_fitted(self, "_onedal_estimator")
 
         if sklearn_check_version("1.0"):
-            self._check_feature_names(X, reset=False)
+            X = self._validate_data(
+                X,
+                dtype=[np.float64, np.float32],
+                force_all_finite=False,
+                reset=False,
+                ensure_2d=True,
+            )  # Warning, order of dtype matters
+        else:
+            X = check_array(
+                X, dtype=[np.float64, np.float32], force_all_finite=False
+            )  # Warning, order of dtype matters
 
         return self._onedal_estimator.predict(X, queue=queue)
+
+    def _onedal_score(self, X, y, sample_weight=None, queue=None):
+        return r2_score(
+            y, self._onedal_predict(X, queue=queue), sample_weight=sample_weight
+        )
 
     def fit(self, X, y, sample_weight=None):
         dispatch(
@@ -1119,8 +1168,23 @@ class ForestRegressor(sklearn_ForestRegressor, BaseForest):
             X,
         )
 
+    @wrap_output_data
+    def score(self, X, y, sample_weight=None):
+        return dispatch(
+            self,
+            "score",
+            {
+                "onedal": self.__class__._onedal_score,
+                "sklearn": sklearn_ForestRegressor.score,
+            },
+            X,
+            y,
+            sample_weight=sample_weight,
+        )
+
     fit.__doc__ = sklearn_ForestRegressor.fit.__doc__
     predict.__doc__ = sklearn_ForestRegressor.predict.__doc__
+    score.__doc__ = sklearn_ForestRegressor.score.__doc__
 
 
 @control_n_jobs(decorated_methods=["fit", "predict", "predict_proba", "score"])

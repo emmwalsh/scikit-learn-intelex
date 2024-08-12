@@ -46,8 +46,6 @@ import warnings
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.preprocessing import normalize
 
-from .._device_offload import support_usm_ndarray
-
 
 def _daal4py_check(self, X, y, check_input):
     _fptype = getFPType(X)
@@ -135,9 +133,11 @@ def _daal4py_fit_enet(self, X, y_, check_input):
     if (
         isinstance(self.precompute, np.ndarray)
         and self.fit_intercept
-        and not np.allclose(X_offset, np.zeros(X.shape[1]))
-        or _normalize
-        and not np.allclose(X_scale, np.ones(X.shape[1]))
+        and (
+            not np.allclose(X_offset, np.zeros(X.shape[1]))
+            or _normalize
+            and not np.allclose(X_scale, np.ones(X.shape[1]))
+        )
     ):
         if sklearn_check_version("1.4"):
             warnings.warn(
@@ -307,9 +307,11 @@ def _daal4py_fit_lasso(self, X, y_, check_input):
     if (
         isinstance(self.precompute, np.ndarray)
         and self.fit_intercept
-        and not np.allclose(X_offset, np.zeros(X.shape[1]))
-        or _normalize
-        and not np.allclose(X_scale, np.ones(X.shape[1]))
+        and (
+            not np.allclose(X_offset, np.zeros(X.shape[1]))
+            or _normalize
+            and not np.allclose(X_scale, np.ones(X.shape[1]))
+        )
     ):
         warnings.warn(
             "Gram matrix was provided but X was centered"
@@ -431,9 +433,9 @@ def _daal4py_predict_lasso(self, X):
     return res
 
 
-def _fit(self, X, y, sample_weight=None, check_input=True):
+def _fit(self, _X, _y, sample_weight=None, check_input=True):
     if sklearn_check_version("1.0"):
-        self._check_feature_names(X, reset=True)
+        self._check_feature_names(_X, reset=True)
     if sklearn_check_version("1.2"):
         self._validate_params()
     elif sklearn_check_version("1.1"):
@@ -470,15 +472,17 @@ def _fit(self, X, y, sample_weight=None, check_input=True):
     # check X and y
     if check_input:
         X, y = check_X_y(
-            X,
-            y,
+            _X,
+            _y,
             copy=False,
             accept_sparse="csc",
             dtype=[np.float64, np.float32],
             multi_output=True,
             y_numeric=True,
         )
-        y = check_array(y, copy=False, dtype=X.dtype.type, ensure_2d=False)
+        y = check_array(_y, copy=False, dtype=X.dtype.type, ensure_2d=False)
+    else:
+        X, y = _X, _y
 
     if not sp.issparse(X):
         self.fit_shape_good_for_daal_ = (
@@ -552,7 +556,7 @@ def _fit(self, X, y, sample_weight=None, check_input=True):
             del self.daal_model_
         logging.info(_function_name + ": " + get_patch_message("sklearn_after_daal"))
         res_new = super(class_inst, self).fit(
-            X, y, sample_weight=sample_weight, check_input=check_input
+            _X, _y, sample_weight=sample_weight, check_input=check_input
         )
         self._gap = res_new.dual_gap_
         return res_new
@@ -682,20 +686,18 @@ class ElasticNet(ElasticNet_original):
                 selection=selection,
             )
 
-    @support_usm_ndarray()
     def fit(self, X, y, sample_weight=None, check_input=True):
         return _fit(self, X, y, sample_weight=sample_weight, check_input=check_input)
 
-    @support_usm_ndarray()
     def predict(self, X):
         if sklearn_check_version("1.0"):
             self._check_feature_names(X, reset=False)
 
-        X = check_array(
+        _X = check_array(
             X, accept_sparse=["csr", "csc", "coo"], dtype=[np.float64, np.float32]
         )
         good_shape_for_daal = (
-            True if X.ndim <= 1 else True if X.shape[0] >= X.shape[1] else False
+            True if _X.ndim <= 1 else True if _X.shape[0] >= _X.shape[1] else False
         )
 
         _patching_status = PatchingConditionsChain(
@@ -704,7 +706,7 @@ class ElasticNet(ElasticNet_original):
         _dal_ready = _patching_status.and_conditions(
             [
                 (hasattr(self, "daal_model_"), "oneDAL model was not trained."),
-                (not sp.issparse(X), "X is sparse. Sparse input is not supported."),
+                (not sp.issparse(_X), "X is sparse. Sparse input is not supported."),
                 (
                     good_shape_for_daal,
                     "The shape of X does not satisfy oneDAL requirements: "
@@ -716,7 +718,7 @@ class ElasticNet(ElasticNet_original):
 
         if not _dal_ready:
             return self._decision_function(X)
-        return _daal4py_predict_enet(self, X)
+        return _daal4py_predict_enet(self, _X)
 
     @property
     def dual_gap_(self):
@@ -799,26 +801,24 @@ class Lasso(Lasso_original):
                 selection=selection,
             )
 
-    @support_usm_ndarray()
     def fit(self, X, y, sample_weight=None, check_input=True):
         return _fit(self, X, y, sample_weight, check_input)
 
-    @support_usm_ndarray()
     def predict(self, X):
         if sklearn_check_version("1.0"):
             self._check_feature_names(X, reset=False)
-        X = check_array(
+        _X = check_array(
             X, accept_sparse=["csr", "csc", "coo"], dtype=[np.float64, np.float32]
         )
         good_shape_for_daal = (
-            True if X.ndim <= 1 else True if X.shape[0] >= X.shape[1] else False
+            True if _X.ndim <= 1 else True if _X.shape[0] >= _X.shape[1] else False
         )
 
         _patching_status = PatchingConditionsChain("sklearn.linear_model.Lasso.predict")
         _dal_ready = _patching_status.and_conditions(
             [
                 (hasattr(self, "daal_model_"), "oneDAL model was not trained."),
-                (not sp.issparse(X), "X is sparse. Sparse input is not supported."),
+                (not sp.issparse(_X), "X is sparse. Sparse input is not supported."),
                 (
                     good_shape_for_daal,
                     "The shape of X does not satisfy oneDAL requirements: "
@@ -830,7 +830,7 @@ class Lasso(Lasso_original):
 
         if not _dal_ready:
             return self._decision_function(X)
-        return _daal4py_predict_lasso(self, X)
+        return _daal4py_predict_lasso(self, _X)
 
     @property
     def dual_gap_(self):
