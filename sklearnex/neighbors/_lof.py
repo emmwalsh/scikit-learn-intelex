@@ -26,7 +26,13 @@ from daal4py.sklearn._utils import sklearn_check_version
 from sklearnex._device_offload import dispatch, wrap_output_data
 from sklearnex.neighbors.common import KNeighborsDispatchingBase
 from sklearnex.neighbors.knn_unsupervised import NearestNeighbors
-from sklearnex.utils import get_namespace
+
+from ..utils._array_api import get_namespace
+
+if sklearn_check_version("1.6"):
+    from sklearn.utils.validation import validate_data
+else:
+    validate_data = sklearn_LocalOutlierFactor._validate_data
 
 
 @control_n_jobs(decorated_methods=["fit", "_kneighbors"])
